@@ -2,6 +2,7 @@
 import os
 import sys
 import datetime
+import pytz
 import subprocess
 import base64
 import logging
@@ -19,7 +20,6 @@ from settings import version, safe_data, safe_homedir, safe_datadir, safe_keydir
 import safe_gpio_sim
 
 
-
 def generate_key(password: bytes, hw_id: str) -> Tuple[RSAPrivateKeyWithSerialization, bytes]:
     """
     Generate an RSA private key from scratch. File it and the public key on disk
@@ -28,19 +28,19 @@ def generate_key(password: bytes, hw_id: str) -> Tuple[RSAPrivateKeyWithSerializ
     :return: RSAPrivateKeyWithSerialization,
     """
     rsa_private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=4096,
-        backend=default_backend())
+            public_exponent=65537,
+            key_size=4096,
+            backend=default_backend())
 
     rsa_private_key_pem = rsa_private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.BestAvailableEncryption(password))
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.BestAvailableEncryption(password))
 
     rsa_public_key = rsa_private_key.public_key()
     rsa_public_key_pem = rsa_public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo)
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo)
 
     # Write both keys to disk
     # Check the directory exists first
@@ -93,9 +93,9 @@ def get_safe_keys(hw_id: str) -> Tuple[RSAPrivateKeyWithSerialization, bytes]:
         logging.debug('Reading keys from disk')
         with open(os.path.join(safe_keydir.format(hw_id), 'private_key.pem'), "rb") as key_file:
             rsa_private_key = serialization.load_pem_private_key(
-                key_file.read(),
-                password=hardware_id_bytes,
-                backend=default_backend()
+                    key_file.read(),
+                    password=hardware_id_bytes,
+                    backend=default_backend()
             )
         with open(os.path.join(safe_keydir.format(hw_id), 'public_key.pem'), "rb") as key_file:
             rsa_public_key_pem = key_file.read()
@@ -116,19 +116,26 @@ def get_server_key(safe: str) -> bytes:
             logging.debug('Got server public key - from local store')
     else:
         server_url = server_url_base + 'api/register'
-        parameters = {'hwid': safe, 'pkey': safe_public_key_pem}
-        print(f"Safe id: {safe}")
-        print(safe_public_key_pem)
-        response = requests.get(server_url, params=parameters)
+        parameters = {'hwid': safe, 'pkey': safe_public_key_pem.decode('utf-8')}
+        print(f"Getting server details for Safe id: {safe}")
+        # print(safe_public_key_pem)
+        response = requests.post(server_url, json=parameters)
         if response.ok:
             # Write the server public key to local storage
-            public_key_pem = bytes(response.text, 'utf-8')
-            print(public_key_pem)
+            # public_key_pem = bytes(response.text, 'utf-8')
+            print(f"Got response {response.json()}")
+            if 'key' in response.json():
+                public_key_pem = bytes(response.json()['key'], 'utf-8')
+            else:
+                print('No "key" element in server JSON response')
+                sys.exit(-1)
+            # print(public_key_pem)
             with open(os.path.join(safe_keydir.format(safe), 'server_key.pem'), "wb") as key_file:
                 key_file.write(public_key_pem)
                 logging.debug(f'Safe: {safe} - Got server public key - from "server"')
         else:
             logging.error(f'Safe: {safe} - Failed to get server key with response message: {response.text}')
+            sys.exit(-1)
     # Convert PEM format of public key to RSAKey format
     public_key = serialization.load_pem_public_key(public_key_pem,
                                                    backend=default_backend())
@@ -153,21 +160,21 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
     # Sign safe message
     safe_message_bin = bytes(safe_message.encode('UTF-8'))
     safe_message_sig = safe_private_key.sign(
-        safe_message_bin,
-        padding.PSS(
-            mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH
-        ),
-        hashes.SHA256())
+            safe_message_bin,
+            padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256())
     safe_message_sig_64 = base64.urlsafe_b64encode(safe_message_sig)
     # Encrypt safe message
     safe_message_enc = server_public_key.encrypt(
-        safe_message_bin,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None
-        ))
+            safe_message_bin,
+            padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+            ))
     safe_message_enc_64 = base64.urlsafe_b64encode(safe_message_enc)
     server_url = server_url_base + 'api/checkin'
     parameters = \
@@ -175,29 +182,33 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
             'hwid': safe, 'sig': str(safe_message_sig_64, 'utf-8'),
             'msg': str(safe_message_enc_64, 'utf-8')
         }
+    print(f"Checkin - submitting {parameters}")
 
     # Submit to server and get response
     try:
-        response = requests.get(server_url, params=parameters)
+        response = requests.post(server_url, json=parameters)
         if response.ok:
             logging.debug(f'Safe: {safe} - CheckIn response: {response.text}')
         else:
             logging.error(f'Safe: {safe} - CheckIn error {response.content}')
 
-        # Extract message and sig from the HTTPResponse
-        separator = '***PART***'
-        if separator in response.text:
-            server_message_enc_64, server_message_sig_64 = response.text.split(separator)
+        # Extract message and sig from the response JSON object
+        parms = response.json()
+        if all(map(lambda x: x in parms, ['msg', 'sig'])):
+            server_message_enc_64 = parms['msg']
+            server_message_sig_64 = parms['sig']
+        else:
+            return False
 
         # Decrypt
         try:
             plaintext = safe_private_key.decrypt(
-                base64.urlsafe_b64decode(server_message_enc_64),
-                padding.OAEP(
-                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None
-                ))
+                    base64.urlsafe_b64decode(server_message_enc_64),
+                    padding.OAEP(
+                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                            algorithm=hashes.SHA256(),
+                            label=None
+                    ))
             decrypt_success = True
         except ValueError:
             logging.error(f"Safe: {safe} - Decrypting error")
@@ -207,13 +218,13 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
         if decrypt_success:
             try:
                 server_public_key.verify(
-                    base64.urlsafe_b64decode(server_message_sig_64),
-                    plaintext,
-                    padding.PSS(
-                        mgf=padding.MGF1(hashes.SHA256()),
-                        salt_length=padding.PSS.MAX_LENGTH
-                    ),
-                    hashes.SHA256())
+                        base64.urlsafe_b64decode(server_message_sig_64),
+                        plaintext,
+                        padding.PSS(
+                                mgf=padding.MGF1(hashes.SHA256()),
+                                salt_length=padding.PSS.MAX_LENGTH
+                        ),
+                        hashes.SHA256())
                 signature_valid = True
                 # print('Signature valid')
             except InvalidSignature as e:
@@ -228,34 +239,34 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
             p2_validity = False
             now = datetime.datetime.now(datetime.timezone.utc)
             plaintext = str(plaintext.decode('utf-8'))
-            # print(plaintext)
             message_parts = plaintext.split('\n')
             print(message_parts)
             if len(message_parts) >= 2:
                 if message_parts[0].startswith('Auth_to_unlock'):
                     m0_parts = message_parts[0].split(':', 2)
+                    auth_tstamp = datetime.datetime.strptime(m0_parts[2], '%Y-%m-%d %H:%M:%S.%f')
+                    auth_tstamp = pytz.utc.localize(auth_tstamp)  # Localize the returned timestamp to UTC
                     if m0_parts[1] == 'TRUE':
                         auth_to_unlock = True
-                        if datetime.datetime.strptime(''.join(m0_parts[2].rsplit(':', 1)),
-                                                      '%Y-%m-%d %H:%M:%S.%f%z') < now:
+                        print(f"m0_parts = {m0_parts[2]}")
+                        if auth_tstamp < now:
                             p1_validity = True
                     elif m0_parts[1] == 'FALSE':
                         auth_to_unlock = False
-                        if datetime.datetime.strptime(''.join(m0_parts[2].rsplit(':', 1)),
-                                                      '%Y-%m-%d %H:%M:%S.%f%z') < now:
+                        if auth_tstamp < now:
                             p1_validity = True
                 if message_parts[1].startswith('Unlock_time'):
-                    m1_parts = message_parts[1].split(':', 1)
                     # If no unlock time given, default to unlock now as a safety feature
-                    unlock_time_str = ''.join(m1_parts[1].rsplit(':', 1))
-                    if unlock_time_str == 'None':
+                    unlock_time_str = message_parts[1][12:]
+                    if unlock_time_str == '':
                         unlock_time = now
                         logging.error(f'Safe: {safe} - Server message contains no unlock time - setting to now: {now}')
                     else:
-                        if '.' in unlock_time_str:  #  The time component has microseconds
-                            unlock_time = datetime.datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S.%f%z')
+                        if '.' in unlock_time_str:  # The time component has microseconds
+                            unlock_time = datetime.datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S.%f')
                         else:
-                            unlock_time = datetime.datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S%z')
+                            unlock_time = datetime.datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S')
+                    unlock_time = pytz.utc.localize(unlock_time)
                     p2_validity = True
                 if p1_validity and p2_validity:
                     validity = True
@@ -272,7 +283,7 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
                             logging.debug(f'Safe: {safe} - Terminate message received - exiting app')
                             safe_gpio_sim.destroy_gpio()
                             print(f'Safe: {safe} - Terminate at server request\n')
-                            # sys.exit(0)
+                            sys.exit(0)
                     else:
                         validity = False
             else:
@@ -288,7 +299,7 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
             log_event('INVALID_MSG_RECD')
     except OSError as e:
         logging.error('Request error in CheckIn - {}'.format(e))
-        safe_gpio_sim.set_lights('ERR')
+        safe_gpio_sim.set_lights('ERR', safe)
         validity = False
     return validity
 
@@ -494,8 +505,7 @@ if __name__ == '__main__':
     scan_number = {}
     event_log = {}
 
-
-    #hardware_id = get_hardware_id()
+    # hardware_id = get_hardware_id()
     safes = [dir for dir in os.listdir(safe_data) if os.path.isdir(os.path.join(safe_data, dir))]
     print(safes)
 
@@ -507,6 +517,7 @@ if __name__ == '__main__':
 
     for current_safe in safes:
         # Read settings - per safe
+        # while True:
         with open(os.path.join(safe_datadir.format(current_safe), 'settings.txt'), 'r') as fi:
             parms = fi.readline().strip().split(',')
             print(f"{current_safe} - {parms}")
@@ -536,3 +547,5 @@ if __name__ == '__main__':
             server_public_key = get_server_key(current_safe)
 
             mainloop(current_safe)
+        sleep(30)
+    print('Simulator terminating')
