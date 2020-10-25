@@ -1,9 +1,7 @@
 # Modules
 import os
 import sys
-import datetime
-import pytz
-import subprocess
+from datetime import datetime, timezone
 import base64
 import logging
 import requests
@@ -16,7 +14,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKeyWithSerialization
 from cryptography.exceptions import InvalidSignature
-from settings import version, safe_data, safe_homedir, safe_datadir, safe_keydir, server_url_base
+from settings import version, safe_data, safe_datadir, safe_keydir, server_url_base
 import safe_gpio_sim
 
 
@@ -74,10 +72,10 @@ def generate_key(password: bytes, hw_id: str) -> Tuple[RSAPrivateKeyWithSerializ
 #         hardware_id = hardware + revision + serial
 #         return hardware_id
 #     else:
-#         interrim = subprocess.check_output("ioreg -rd1 -c IOPlatformExpertDevice | grep -E '(UUID)'",
+#         interim = subprocess.check_output("ioreg -rd1 -c IOPlatformExpertDevice | grep -E '(UUID)'",
 #                                            shell=True).strip().decode('utf-8')
 #
-#         hardware_id = interrim.split(' ')[2].strip('"')
+#         hardware_id = interim.split(' ')[2].strip('"')
 #         return hardware_id
 
 
@@ -149,7 +147,7 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
     """
     global auth_to_unlock
     global unlock_time
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.now(timezone.utc)
     # Send status to server
     safe_message = 'STATUS,{},{},{},{},{}\n'.format(safe, now, status[0], status[1],
                                                     status[2])
@@ -237,15 +235,15 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
             # Interpret message and test message validity
             p1_validity = False
             p2_validity = False
-            now = datetime.datetime.now(datetime.timezone.utc)
+            now = datetime.now(timezone.utc)
             plaintext = str(plaintext.decode('utf-8'))
             message_parts = plaintext.split('\n')
             print(message_parts)
             if len(message_parts) >= 2:
                 if message_parts[0].startswith('Auth_to_unlock'):
                     m0_parts = message_parts[0].split(':', 2)
-                    auth_tstamp = datetime.datetime.strptime(m0_parts[2], '%Y-%m-%d %H:%M:%S.%f')
-                    auth_tstamp = pytz.utc.localize(auth_tstamp)  # Localize the returned timestamp to UTC
+                    auth_tstamp = datetime.strptime(m0_parts[2], '%Y-%m-%d %H:%M:%S.%f')
+                    auth_tstamp = auth_tstamp.replace(tzinfo=timezone.utc)  # Localize the returned timestamp to UTC
                     if m0_parts[1] == 'TRUE':
                         auth_to_unlock = True
                         print(f"m0_parts = {m0_parts[2]}")
@@ -263,10 +261,10 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
                         logging.error(f'Safe: {safe} - Server message contains no unlock time - setting to now: {now}')
                     else:
                         if '.' in unlock_time_str:  # The time component has microseconds
-                            unlock_time = datetime.datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S.%f')
+                            unlock_time = datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S.%f')
                         else:
-                            unlock_time = datetime.datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S')
-                    unlock_time = pytz.utc.localize(unlock_time)
+                            unlock_time = datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S')
+                    unlock_time = unlock_time.replace(tzinfo=timezone.utc)
                     p2_validity = True
                 if p1_validity and p2_validity:
                     validity = True
@@ -295,8 +293,8 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
             # if signature is invalid effectively prevent unlock
             auth_to_unlock = False
             validity = False
-            unlock_time = datetime.datetime(2199, 12, 31, 12, 0, 0, 0)
-            log_event('INVALID_MSG_RECD')
+            unlock_time = datetime(2199, 12, 31, 12, 0, 0, 0)
+            log_event('INVALID_MSG_RECD', safe)
     except OSError as e:
         logging.error('Request error in CheckIn - {}'.format(e))
         safe_gpio_sim.set_lights('ERR', safe)
@@ -351,7 +349,7 @@ def set_settings(settings_msg: str, safe: str):
     return
 
 
-def show_lights(now: datetime.datetime, safe: str):
+def show_lights(now: datetime, safe: str):
     """
     Display lights on the safe showing the auth to unlock 'G', and up to 5 lights 'R'
     giving proximity to unlock time in proximity units.
@@ -400,7 +398,7 @@ def log_event(event: str, safe: str) -> None:
     :return:
     """
     global event_log
-    event_log[safe].append((datetime.datetime.now(datetime.timezone.utc), event))
+    event_log[safe].append((datetime.now(timezone.utc), event))
     return
 
 
@@ -430,7 +428,7 @@ def log_event(event: str, safe: str) -> None:
 #     print('Diagnostic message:  Celebration')
 
 
-def button_pushed(channel):
+def button_pushed(channel, safe):
     """
     Called when the safe button is pressed
     :return:
@@ -441,15 +439,15 @@ def button_pushed(channel):
         logging.debug('Button pressed - unlocking')
         # celebration()
         if lock_engaged:
-            safe_gpio_sim.unlock_safe()
+            safe_gpio_sim.unlock_safe(safe)
             lock_engaged = False
     else:
         print('Unlocking not permitted')
         logging.debug('Button pressed - not permitted to unlock')
         # dissuasion()
-        show_lights(datetime.datetime.now(datetime.timezone.utc))
+        show_lights(datetime.now(timezone.utc), safe)
         if not lock_engaged:
-            safe_gpio_sim.lock_safe()
+            safe_gpio_sim.lock_safe(safe)
             lock_engaged = True
     return
 
@@ -465,7 +463,7 @@ def mainloop(safe: str) -> None:
     global scan_number
     print(f"Starting mainloop for {safe}")
     unlock_status = 'indeterminate'
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.now(timezone.utc)
     # Get safe status
     safe_status = safe_gpio_sim.get_safe_status(safe)
     # Log an event if safe status changes
@@ -526,13 +524,13 @@ if __name__ == '__main__':
             proximityunit = parms[2]
             displayproximity = parms[3] == 'True'
             auth_to_unlock = parms[4] == 'True'
-            unlock_time = datetime.datetime(int(parms[5]),
-                                            int(parms[6]),
-                                            int(parms[7]),
-                                            int(parms[8]),
-                                            int(parms[9]),
-                                            int(parms[10]),
-                                            int(parms[11])).replace(tzinfo=datetime.timezone.utc)
+            unlock_time = datetime(int(parms[5]),
+                                   int(parms[6]),
+                                   int(parms[7]),
+                                   int(parms[8]),
+                                   int(parms[9]),
+                                   int(parms[10]),
+                                   int(parms[11])).replace(tzinfo=timezone.utc)
             # Need to work on the bits below
             event_log[current_safe] = []
             log_event('STARTING_OPERATION', current_safe)
