@@ -113,18 +113,23 @@ def get_server_key(safe: str) -> bytes:
             public_key_pem = key_file.read()
             logging.debug('Got server public key - from local store')
     else:
-        server_url = server_url_base + 'api/register'
+        server_url = server_url_base + 'api/register/'
         parameters = {'hwid': safe, 'pkey': safe_public_key_pem.decode('utf-8')}
         print(f"Getting server details for Safe id: {safe}")
         # print(safe_public_key_pem)
-        response = requests.post(server_url, json=parameters)
+        #response = requests.post(server_url, json=parameters)   # POST when using Flask server
+        response = requests.get(server_url, params=parameters)  # GET when using Django server
         if response.ok:
             # Write the server public key to local storage
-            # public_key_pem = bytes(response.text, 'utf-8')
-            print(f"Got response {response.json()}")
-            if 'key' in response.json():
-                public_key_pem = bytes(response.json()['key'], 'utf-8')
-            else:
+
+            #print(f"Got response {response.text}")
+            public_key_pem = bytes(response.text, 'utf-8')
+            # if 'key' in response.json():
+            #     public_key_pem = bytes(response.json()['key'], 'utf-8')
+            # else:
+            #     print('No "key" element in server JSON response')
+            #     sys.exit(-1)
+            if not public_key_pem.startswith(b'-----BEGIN PUBLIC KEY-----'):
                 print('No "key" element in server JSON response')
                 sys.exit(-1)
             # print(public_key_pem)
@@ -174,7 +179,7 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
                     label=None
             ))
     safe_message_enc_64 = base64.urlsafe_b64encode(safe_message_enc)
-    server_url = server_url_base + 'api/checkin'
+    server_url = server_url_base + 'api/checkin/'
     parameters = \
         {
             'hwid': safe, 'sig': str(safe_message_sig_64, 'utf-8'),
@@ -184,17 +189,23 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
 
     # Submit to server and get response
     try:
-        response = requests.post(server_url, json=parameters)
+        response = requests.get(server_url, params=parameters)
         if response.ok:
             logging.debug(f'Safe: {safe} - CheckIn response: {response.text}')
         else:
             logging.error(f'Safe: {safe} - CheckIn error {response.content}')
 
         # Extract message and sig from the response JSON object
-        parms = response.json()
-        if all(map(lambda x: x in parms, ['msg', 'sig'])):
-            server_message_enc_64 = parms['msg']
-            server_message_sig_64 = parms['sig']
+        # parms = response.json()
+        # if all(map(lambda x: x in parms, ['msg', 'sig'])):
+        #     server_message_enc_64 = parms['msg']
+        #     server_message_sig_64 = parms['sig']
+        # else:
+        #     return False
+
+        # Split response into message and sig
+        if '***PART***' in response.text:
+            server_message_enc_64, server_message_sig_64 = response.text.split('***PART***')
         else:
             return False
 
@@ -224,12 +235,13 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
                         ),
                         hashes.SHA256())
                 signature_valid = True
-                # print('Signature valid')
             except InvalidSignature as e:
                 logging.info(f'Safe: {safe} - Invalid signature : {e}')
                 signature_valid = False
         else:
             signature_valid = False
+
+        print(f'Signature valid: {signature_valid}')
 
         if signature_valid:
             # Interpret message and test message validity
@@ -242,7 +254,7 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
             if len(message_parts) >= 2:
                 if message_parts[0].startswith('Auth_to_unlock'):
                     m0_parts = message_parts[0].split(':', 2)
-                    auth_tstamp = datetime.strptime(m0_parts[2], '%Y-%m-%d %H:%M:%S.%f')
+                    auth_tstamp = datetime.strptime(m0_parts[2], '%Y-%m-%d %H:%M:%S.%f%z')
                     auth_tstamp = auth_tstamp.replace(tzinfo=timezone.utc)  # Localize the returned timestamp to UTC
                     if m0_parts[1] == 'TRUE':
                         auth_to_unlock = True
@@ -261,7 +273,7 @@ def check_in(status: Tuple[bool, bool, bool], safe: str) -> bool:
                         logging.error(f'Safe: {safe} - Server message contains no unlock time - setting to now: {now}')
                     else:
                         if '.' in unlock_time_str:  # The time component has microseconds
-                            unlock_time = datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S.%f')
+                            unlock_time = datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S.%f%z')
                         else:
                             unlock_time = datetime.strptime(unlock_time_str, '%Y-%m-%d %H:%M:%S')
                     unlock_time = unlock_time.replace(tzinfo=timezone.utc)
@@ -518,7 +530,7 @@ if __name__ == '__main__':
         # while True:
         with open(os.path.join(safe_datadir.format(current_safe), 'settings.txt'), 'r') as fi:
             parms = fi.readline().strip().split(',')
-            print(f"{current_safe} - {parms}")
+            print(f"Current safe = {current_safe} - {parms}")
             scanfreq = int(parms[0])  # seconds
             reportfreq = int(parms[1])  # number of scanfreq periods
             proximityunit = parms[2]
@@ -545,5 +557,5 @@ if __name__ == '__main__':
             server_public_key = get_server_key(current_safe)
 
             mainloop(current_safe)
-        sleep(30)
+        sleep(10)
     print('Simulator terminating')
